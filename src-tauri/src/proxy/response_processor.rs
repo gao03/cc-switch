@@ -3,6 +3,7 @@
 //! 统一处理流式和非流式 API 响应
 
 use super::{
+    debug_log::{self, LogRequestId},
     handler_config::UsageParserConfig,
     handler_context::{RequestContext, StreamingTimeoutConfig},
     server::ProxyState,
@@ -46,6 +47,10 @@ pub async fn handle_streaming(
     state: &ProxyState,
     parser_config: &UsageParserConfig,
 ) -> Response {
+    let request_id = response
+        .extensions()
+        .get::<LogRequestId>()
+        .map(|id| id.0.clone());
     let status = response.status();
     let mut builder = axum::response::Response::builder().status(status);
 
@@ -66,8 +71,13 @@ pub async fn handle_streaming(
     let timeout_config = ctx.streaming_timeout_config();
 
     // 创建带日志和超时的透传流
-    let logged_stream =
-        create_logged_passthrough_stream(stream, ctx.tag, Some(usage_collector), timeout_config);
+    let logged_stream = create_logged_passthrough_stream(
+        stream,
+        ctx.tag,
+        Some(usage_collector),
+        timeout_config,
+        request_id,
+    );
 
     let body = axum::body::Body::from_stream(logged_stream);
     match builder.body(body) {
@@ -86,6 +96,10 @@ pub async fn handle_non_streaming(
     state: &ProxyState,
     parser_config: &UsageParserConfig,
 ) -> Result<Response, ProxyError> {
+    let request_id = response
+        .extensions()
+        .get::<LogRequestId>()
+        .map(|id| id.0.clone());
     let response_headers = response.headers().clone();
     let status = response.status();
 
@@ -94,6 +108,13 @@ pub async fn handle_non_streaming(
         log::error!("[{}] 读取响应失败: {e}", ctx.tag);
         ProxyError::ForwardFailed(format!("Failed to read response body: {e}"))
     })?;
+
+    // 记录响应体日志
+    if let Some(id) = &request_id {
+        let body_text = String::from_utf8_lossy(&body_bytes).to_string();
+        debug_log::log_response_chunk(id, &body_text);
+        debug_log::write_log_entry("\n--------------------------------------------------\n\n".to_string());
+    }
 
     // 解析并记录使用量
     if let Ok(json_value) = serde_json::from_slice::<Value>(&body_bytes) {
@@ -423,11 +444,13 @@ pub fn create_logged_passthrough_stream(
     tag: &'static str,
     usage_collector: Option<SseUsageCollector>,
     timeout_config: StreamingTimeoutConfig,
+    request_id: Option<String>,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
     async_stream::stream! {
         let mut buffer = String::new();
         let mut collector = usage_collector;
         let mut is_first_chunk = true;
+        let req_id = request_id;
 
         // 超时配置
         let first_byte_timeout = if timeout_config.first_byte_timeout > 0 {
@@ -472,6 +495,12 @@ pub fn create_logged_passthrough_stream(
                 Some(Ok(bytes)) => {
                     is_first_chunk = false;
                     let text = String::from_utf8_lossy(&bytes);
+                    
+                    // 记录流式块到日志
+                    if let Some(id) = &req_id {
+                        debug_log::log_response_chunk(id, &text);
+                    }
+                    
                     buffer.push_str(&text);
 
                     // 尝试解析并记录完整的 SSE 事件
