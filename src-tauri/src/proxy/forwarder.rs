@@ -740,3 +740,11 @@ impl RequestForwarder {
         }
     }
 }
+
+/// 从 ProxyError 中提取错误消息
+fn extract_error_message(error: &ProxyError) -> Option<String> {
+    match error {
+        ProxyError::UpstreamError { body, .. } => body.clone(),
+        _ => Some(error.to_string()),
+    }
+}
