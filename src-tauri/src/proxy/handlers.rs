@@ -167,6 +167,7 @@ async fn handle_claude_transform(
             "Claude/OpenRouter",
             Some(usage_collector),
             timeout_config,
+            None,
         );
 
         let mut headers = axum::http::HeaderMap::new();

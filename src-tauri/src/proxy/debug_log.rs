@@ -43,7 +43,7 @@ pub fn log_request(
 ) {
     let now = chrono::Local::now();
     let entry = format!(
-        "[{}] [REQ:{}] Provider: {}\nURL: {}\nHeaders: {{:?}}\nBody: {{}}\n\n--------------------------------------------------\n\n",
+        "[{}] [REQ:{}] Provider: {}\nURL: {}\nHeaders: {:?}\nBody: {}\n\n--------------------------------------------------\n\n",
         now.format("%Y-%m-%d %H:%M:%S%.3f"),
         request_id,
         provider_name,
@@ -62,7 +62,7 @@ pub fn log_response_headers(
 ) {
     let now = chrono::Local::now();
     let entry = format!(
-        "[{}] [RES:{{}}] Status: {{}}\nHeaders: {{:?}}\n\n--------------------------------------------------\n\n",
+        "[{}] [RES:{}] Status: {}\nHeaders: {:?}\n\n--------------------------------------------------\n\n",
         now.format("%Y-%m-%d %H:%M:%S%.3f"),
         request_id,
         status,
@@ -75,7 +75,7 @@ pub fn log_response_headers(
 pub fn log_response_chunk(request_id: &str, chunk: &str) {
     let now = chrono::Local::now();
     let entry = format!(
-        "[{}] [CHUNK:{{}}] Content: {{}}\n",
+        "[{}] [CHUNK:{}] Content: {}\n",
         now.format("%Y-%m-%d %H:%M:%S%.3f"),
         request_id,
         chunk
@@ -87,7 +87,7 @@ pub fn log_response_chunk(request_id: &str, chunk: &str) {
 pub fn log_response_error(request_id: &str, status: u16, body: &Option<String>) {
     let now = chrono::Local::now();
     let entry = format!(
-        "[{}] [ERR:{{}}] Upstream Error Status: {{}}\nBody: {{}}\n\n--------------------------------------------------\n\n",
+        "[{}] [ERR:{}] Upstream Error Status: {}\nBody: {}\n\n--------------------------------------------------\n\n",
         now.format("%Y-%m-%d %H:%M:%S%.3f"),
         request_id,
         status,
@@ -100,7 +100,7 @@ pub fn log_response_error(request_id: &str, status: u16, body: &Option<String>) 
 pub fn log_network_error(request_id: &str, error: &str) {
     let now = chrono::Local::now();
     let entry = format!(
-        "[{}] [NET_ERR:{{}}] Error: {{}}\n\n--------------------------------------------------\n\n",
+        "[{}] [NET_ERR:{}] Error: {}\n\n--------------------------------------------------\n\n",
         now.format("%Y-%m-%d %H:%M:%S%.3f"),
         request_id,
         error
