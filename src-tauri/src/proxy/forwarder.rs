@@ -740,5 +740,3 @@ impl RequestForwarder {
         }
     }
 }
-
-/// 从 ProxyError 中提取错误消息
