@@ -15,6 +15,8 @@ use super::{
 use crate::{app_config::AppType, provider::Provider};
 use reqwest::Response;
 use serde_json::Value;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -585,6 +587,9 @@ impl RequestForwarder {
         // 默认使用空白名单，过滤所有 _ 前缀字段
         let filtered_body = filter_private_params_with_whitelist(request_body, &[]);
 
+        // 记录请求日志
+        log_downstream_request(&provider.name, &url, &filtered_body, headers);
+
         // 每次请求时获取最新的全局 HTTP 客户端（支持热更新代理配置）
         let client = super::http_client::get();
         let mut request = client.post(&url);
@@ -717,5 +722,50 @@ fn extract_error_message(error: &ProxyError) -> Option<String> {
     match error {
         ProxyError::UpstreamError { body, .. } => body.clone(),
         _ => Some(error.to_string()),
+    }
+}
+
+/// 记录下游请求日志
+fn log_downstream_request(
+    provider_name: &str,
+    url: &str,
+    body: &Value,
+    headers: &axum::http::HeaderMap,
+) {
+    if let Some(home) = dirs::home_dir() {
+        let log_dir = home.join("tmp").join("log");
+        if let Err(e) = std::fs::create_dir_all(&log_dir) {
+            log::error!("Failed to create log dir: {}", e);
+            return;
+        }
+
+        let now = chrono::Local::now();
+        let filename = format!("cc-{}.log", now.format("%Y%m%d%H"));
+        let log_path = log_dir.join(filename);
+
+        let mut file = match OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            Ok(f) => f,
+            Err(e) => {
+                log::error!("Failed to open log file: {}", e);
+                return;
+            }
+        };
+
+        let log_entry = format!(
+            "[{}] Provider: {}\nURL: {}\nHeaders: {:?}\nBody: {}\n\n--------------------------------------------------\n\n",
+            now.format("%Y-%m-%d %H:%M:%S%.3f"),
+            provider_name,
+            url,
+            headers,
+            serde_json::to_string_pretty(body).unwrap_or_else(|_| "Invalid JSON".to_string())
+        );
+
+        if let Err(e) = file.write_all(log_entry.as_bytes()) {
+            log::error!("Failed to write to log file: {}", e);
+        }
     }
 }
