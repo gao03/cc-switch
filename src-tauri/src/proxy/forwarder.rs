@@ -19,6 +19,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
 /// Headers 黑名单 - 不透传到上游的 Headers
 ///
@@ -587,8 +588,15 @@ impl RequestForwarder {
         // 默认使用空白名单，过滤所有 _ 前缀字段
         let filtered_body = filter_private_params_with_whitelist(request_body, &[]);
 
-        // 记录请求日志
-        log_downstream_request(&provider.name, &url, &filtered_body, headers);
+        // 生成请求 ID 并记录日志
+        let request_id = Uuid::new_v4().to_string();
+        log_downstream_request(
+            &request_id,
+            &provider.name,
+            &url,
+            &filtered_body,
+            headers,
+        );
 
         // 每次请求时获取最新的全局 HTTP 客户端（支持热更新代理配置）
         let client = super::http_client::get();
@@ -669,12 +677,21 @@ impl RequestForwarder {
 
         // 发送请求
         let response = request.json(&filtered_body).send().await.map_err(|e| {
-            if e.is_timeout() {
-                ProxyError::Timeout(format!("请求超时: {e}"))
+            let error_msg = if e.is_timeout() {
+                format!("请求超时: {e}")
             } else if e.is_connect() {
-                ProxyError::ForwardFailed(format!("连接失败: {e}"))
+                format!("连接失败: {e}")
             } else {
-                ProxyError::ForwardFailed(e.to_string())
+                e.to_string()
+            };
+            log_network_error(&request_id, &error_msg);
+            
+            if e.is_timeout() {
+                ProxyError::Timeout(error_msg)
+            } else if e.is_connect() {
+                ProxyError::ForwardFailed(error_msg)
+            } else {
+                ProxyError::ForwardFailed(error_msg)
             }
         })?;
 
@@ -682,10 +699,13 @@ impl RequestForwarder {
         let status = response.status();
 
         if status.is_success() {
+            log_downstream_response_headers(&request_id, status, response.headers());
             Ok(response)
         } else {
             let status_code = status.as_u16();
             let body_text = response.text().await.ok();
+            
+            log_downstream_response_error(&request_id, status_code, &body_text);
 
             Err(ProxyError::UpstreamError {
                 status: status_code,
@@ -725,13 +745,8 @@ fn extract_error_message(error: &ProxyError) -> Option<String> {
     }
 }
 
-/// 记录下游请求日志
-fn log_downstream_request(
-    provider_name: &str,
-    url: &str,
-    body: &Value,
-    headers: &axum::http::HeaderMap,
-) {
+/// 写入日志文件
+fn write_log_entry(entry: String) {
     if let Some(home) = dirs::home_dir() {
         let log_dir = home.join("tmp").join("log");
         if let Err(e) = std::fs::create_dir_all(&log_dir) {
@@ -755,17 +770,71 @@ fn log_downstream_request(
             }
         };
 
-        let log_entry = format!(
-            "[{}] Provider: {}\nURL: {}\nHeaders: {:?}\nBody: {}\n\n--------------------------------------------------\n\n",
-            now.format("%Y-%m-%d %H:%M:%S%.3f"),
-            provider_name,
-            url,
-            headers,
-            serde_json::to_string_pretty(body).unwrap_or_else(|_| "Invalid JSON".to_string())
-        );
-
-        if let Err(e) = file.write_all(log_entry.as_bytes()) {
+        if let Err(e) = file.write_all(entry.as_bytes()) {
             log::error!("Failed to write to log file: {}", e);
         }
     }
+}
+
+/// 记录请求日志
+fn log_downstream_request(
+    request_id: &str,
+    provider_name: &str,
+    url: &str,
+    body: &Value,
+    headers: &axum::http::HeaderMap,
+) {
+    let now = chrono::Local::now();
+    let entry = format!(
+        "[{}] [REQ:{}] Provider: {}\nURL: {}\nHeaders: {:?}\nBody: {}\n\n--------------------------------------------------\n\n",
+        now.format("%Y-%m-%d %H:%M:%S%.3f"),
+        request_id,
+        provider_name,
+        url,
+        headers,
+        serde_json::to_string_pretty(body).unwrap_or_else(|_| "Invalid JSON".to_string())
+    );
+    write_log_entry(entry);
+}
+
+/// 记录响应头日志（成功时）
+fn log_downstream_response_headers(
+    request_id: &str,
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+) {
+    let now = chrono::Local::now();
+    let entry = format!(
+        "[{}] [RES:{}] Status: {}\nHeaders: {:?}\n\n--------------------------------------------------\n\n",
+        now.format("%Y-%m-%d %H:%M:%S%.3f"),
+        request_id,
+        status,
+        headers
+    );
+    write_log_entry(entry);
+}
+
+/// 记录响应错误日志（上游返回错误状态码时）
+fn log_downstream_response_error(request_id: &str, status: u16, body: &Option<String>) {
+    let now = chrono::Local::now();
+    let entry = format!(
+        "[{}] [ERR:{}] Upstream Error Status: {}\nBody: {}\n\n--------------------------------------------------\n\n",
+        now.format("%Y-%m-%d %H:%M:%S%.3f"),
+        request_id,
+        status,
+        body.as_deref().unwrap_or("(empty)")
+    );
+    write_log_entry(entry);
+}
+
+/// 记录网络错误日志
+fn log_network_error(request_id: &str, error: &str) {
+    let now = chrono::Local::now();
+    let entry = format!(
+        "[{}] [NET_ERR:{}] Error: {}\n\n--------------------------------------------------\n\n",
+        now.format("%Y-%m-%d %H:%M:%S%.3f"),
+        request_id,
+        error
+    );
+    write_log_entry(entry);
 }
