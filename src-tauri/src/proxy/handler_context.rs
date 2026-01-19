@@ -216,6 +216,7 @@ impl RequestContext {
             first_byte_timeout,
             idle_timeout,
             self.rectifier_config.clone(),
+            None, // 使用默认的 RetryConfig
         )
     }
 

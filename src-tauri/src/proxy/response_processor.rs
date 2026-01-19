@@ -513,6 +513,17 @@ pub fn create_logged_passthrough_stream(
                             for line in event_text.lines() {
                                 if let Some(data) = line.strip_prefix("data: ") {
                                     if data.trim() != "[DONE]" {
+                                        // 检测 Rate limit 错误
+                                        if super::rate_limit_retry::detect_rate_limit_in_sse(&event_text) {
+                                            log::warn!(
+                                                "[{}] 检测到流式响应中的 Rate limit 错误: {}",
+                                                tag,
+                                                data.chars().take(100).collect::<String>()
+                                            );
+                                            // 注意：在流式响应中，我们无法直接重试整个请求
+                                            // 这个错误会被传递给客户端，客户端可以选择重新发起请求
+                                        }
+
                                         if let Ok(json_value) = serde_json::from_str::<Value>(data) {
                                             if let Some(c) = &collector {
                                                 c.push(json_value.clone()).await;

@@ -9,6 +9,7 @@ use super::{
     failover_switch::FailoverSwitchManager,
     provider_router::ProviderRouter,
     providers::{get_adapter, ProviderAdapter, ProviderType},
+    rate_limit_retry::{detect_rate_limit_in_sse, RetryConfig, RetryState},
     thinking_rectifier::{rectify_anthropic_request, should_rectify_thinking_signature},
     types::{ProxyStatus, RectifierConfig},
     ProxyError,
@@ -97,6 +98,8 @@ pub struct RequestForwarder {
     current_provider_id_at_start: String,
     /// 整流器配置
     rectifier_config: RectifierConfig,
+    /// Rate limit 重试配置
+    retry_config: RetryConfig,
     /// 非流式请求超时（秒）
     non_streaming_timeout: std::time::Duration,
 }
@@ -114,6 +117,7 @@ impl RequestForwarder {
         _streaming_first_byte_timeout: u64,
         _streaming_idle_timeout: u64,
         rectifier_config: RectifierConfig,
+        retry_config: Option<RetryConfig>,
     ) -> Self {
         Self {
             router,
@@ -123,6 +127,7 @@ impl RequestForwarder {
             app_handle,
             current_provider_id_at_start,
             rectifier_config,
+            retry_config: retry_config.unwrap_or_default(),
             non_streaming_timeout: std::time::Duration::from_secs(non_streaming_timeout),
         }
     }
@@ -195,7 +200,7 @@ impl RequestForwarder {
 
             // 转发请求（每个 Provider 只尝试一次，重试由客户端控制）
             match self
-                .forward(provider, endpoint, &body, &headers, adapter.as_ref())
+                .forward_with_rate_limit_retry(provider, endpoint, &body, &headers, adapter.as_ref())
                 .await
             {
                 Ok(response) => {
@@ -336,7 +341,7 @@ impl RequestForwarder {
 
                             // 使用同一供应商重试（不计入熔断器）
                             match self
-                                .forward(provider, endpoint, &body, &headers, adapter.as_ref())
+                                .forward_with_rate_limit_retry(provider, endpoint, &body, &headers, adapter.as_ref())
                                 .await
                             {
                                 Ok(response) => {
@@ -715,6 +720,73 @@ impl RequestForwarder {
                 status: status_code,
                 body: body_text,
             })
+        }
+    }
+
+    /// 转发单个请求（带 Rate limit 重试）
+    async fn forward_with_rate_limit_retry(
+        &self,
+        provider: &Provider,
+        endpoint: &str,
+        body: &Value,
+        headers: &axum::http::HeaderMap,
+        adapter: &dyn ProviderAdapter,
+    ) -> Result<Response, ProxyError> {
+        let mut retry_state = RetryState::new(self.retry_config.clone());
+
+        loop {
+            // 尝试发送请求
+            match self.forward(provider, endpoint, body, headers, adapter).await {
+                Ok(response) => {
+                    let status = response.status();
+
+                    // 检查是否是 429 (Too Many Requests) 状态码
+                    if status.as_u16() == 429 {
+                        if retry_state.can_retry() {
+                            log::warn!(
+                                "[RATE-LIMIT] 收到 429 状态码，准备重试 (第 {}/{} 次)",
+                                retry_state.attempt + 1,
+                                self.retry_config.max_retries
+                            );
+
+                            retry_state.wait_and_increment().await;
+                            continue; // 重试
+                        } else {
+                            log::error!(
+                                "[RATE-LIMIT] 429 错误，已达最大重试次数 ({})",
+                                self.retry_config.max_retries
+                            );
+                        }
+                    }
+
+                    // 对于其他状态码或成功响应，直接返回
+                    return Ok(response);
+                }
+                Err(error) => {
+                    // 检查错误是否包含 Rate limit 信息
+                    if let Some(error_msg) = extract_error_message(&error) {
+                        if super::rate_limit_retry::is_rate_limit_error(&error_msg) {
+                            if retry_state.can_retry() {
+                                log::warn!(
+                                    "[RATE-LIMIT] 请求失败包含 Rate limit 错误，准备重试: {}",
+                                    error_msg.chars().take(100).collect::<String>()
+                                );
+
+                                retry_state.wait_and_increment().await;
+                                continue; // 重试
+                            } else {
+                                log::error!(
+                                    "[RATE-LIMIT] Rate limit 错误，已达最大重试次数 ({})",
+                                    self.retry_config.max_retries
+                                );
+                            }
+                        }
+                    }
+
+                    // 不是 Rate limit 错误或已达重试上限，返回原始错误
+                    return Err(error);
+                }
+            }
         }
     }
 
